@@ -1,54 +1,59 @@
-# 🚌 CampusFleet ESP32 Dynamic Rolling Cryptographic Bus Display
+# 🚌 CampusFleet ESP32 Dynamic Rolling Cryptographic Bus Display (100% Full-Offline)
 
 [![ESP32](https://img.shields.io/badge/Hardware-ESP32%20%2F%20ESP32--S3-blue.svg)](https://www.espressif.com/)
 [![PlatformIO](https://img.shields.io/badge/IDE-PlatformIO-orange.svg)](https://platformio.org/)
 [![Arduino](https://img.shields.io/badge/Framework-Arduino-teal.svg)](https://www.arduino.cc/)
-[![GPS Ready](https://img.shields.io/badge/GPS-Offline%20Atomic%20Sync-green.svg)](https://github.com/CampusFleet)
+[![GPS Atomic Sync](https://img.shields.io/badge/GPS-100%25%20Offline%20Air--Gapped-green.svg)](https://github.com/CampusFleet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Organization](https://img.shields.io/badge/Org-CampusFleet-purple.svg)](https://github.com/CampusFleet)
 
 Production firmware for physical **ESP32** microcontrollers paired with SPI TFT LCD displays (ST7796, ILI9341, ST7789) mounted at bus boarding entry doors.
 
-Directly integrates with the **[CampusFleet Platform](https://campusfleet.vercel.app)** to deliver **zero-proxy dynamic rolling QR boarding verification**:
-1. **2-Second Cryptographic Time Block**: Generates a new rolling cryptographic authentication token every 2 seconds (`TimeBlock = EpochSeconds / 2`).
-2. **Hardware-Accelerated HMAC-SHA256**: Uses ESP32 hardware crypto acceleration (`mbedtls`) with a 32-character pre-shared master key to sign `CFLEET:{BusId}:{TimeBlock}`.
-3. **Zero-Proxy Anti-Tamper Security**: Screenshots, shared photos, and remote proxies expire within 2 seconds. Students must be physically standing in front of the active display to scan and board.
-4. **Dual Time Synchronization**:
-   - **🛰️ Offline GPS Satellite Atomic Clock**: Decodes atomic UTC timestamps directly from GPS/GNSS satellites (NEO-6M / NEO-M8N / ATGM336H via UART2). Operates **100% offline in dead zones with zero internet or Wi-Fi**.
-   - **📶 Cloud NTP Fallback**: Synchronizes high-precision atomic time via onboard Wi-Fi or 4G LTE Cat-1 hotspot using Google NTP (`time.google.com`) and `pool.ntp.org`.
+**100% Air-Gapped & Fully Offline**:
+- **No Wi-Fi stack**: Zero `#include <WiFi.h>`, no Wi-Fi credentials, no network dependencies.
+- **No Cellular/SIM Card**: Does not require any 4G LTE router, data plan, or internet connection.
+- **Satellite Atomic Clock**: Obtains microsecond-precision UTC time directly from orbiting GPS/GNSS satellites (NEO-6M / NEO-M8N / ATGM336H via hardware UART2).
+- **Zero-Proxy Anti-Tamper Security**:
+  1. **2-Second Cryptographic Time Block**: Generates a new rolling cryptographic authentication token every 2 seconds (`TimeBlock = EpochSeconds / 2`).
+  2. **Hardware-Accelerated HMAC-SHA256**: Uses ESP32 hardware crypto acceleration (`mbedtls`) with a 32-character pre-shared master key to sign `CFLEET:{BusId}:{TimeBlock}`.
+  3. **Replay & Proxy Immune**: Screenshots, shared photos, and remote proxies expire within 2 seconds. Students scan with their smartphone camera, which submits the token to the cloud for verification.
 
 ---
 
-## 🔐 Cryptographic Architecture
+## 🔐 Air-Gapped Cryptographic Architecture
 
 ```
 ┌─────────────────────────────────┐          ┌─────────────────────────┐
-│         ESP32 Onboard           │          │   CampusFleet Cloud     │
-│       Bus Entry Display         │          │    Next.js Backend      │
-│  (Offline GPS / Online NTP)     │          │                         │
+│     ESP32 Onboard Terminal      │          │   CampusFleet Cloud     │
+│       (100% Full Offline)       │          │    Next.js Backend      │
+│                                 │          │                         │
+│  🛰️ GPS Satellites (Atomic UTC) │          │                         │
+│                 │               │          │                         │
+│         Hardware UART2          │          │                         │
+│                 │               │          │                         │
+│        Epoch / 2 = TimeBlock    │          │                         │
+│                 │               │          │                         │
+│        HMAC-SHA256(Key, Msg)    │          │                         │
+│        Msg: "CFLEET:42:TBlock"  │          │                         │
+│                 │               │          │                         │
+│        Dynamic 2s Rolling QR:   │          │                         │
+│        cf://b/42?t=TB&k=Token   │          │                         │
 └────────────────┬────────────────┘          └────────────┬────────────┘
                  │                                        │
-        Epoch / 2 = TimeBlock                             │
-                 │                                        │
-        HMAC-SHA256(Key, Msg)                             │
-        Msg: "CFLEET:42:TBlock"                           │
-                 │                                        │
-        Compact QR:                                       │
-        cf://b/42?t=TBlock&k=Token                        │
-                 │                                        │
                  │           Student Scans with Camera    │
+                 │   (Student phone has cellular data)    │
                  ├───────────────────────────────────────►│
                  │                                        │ Verify HMAC Token
                  │                                        │ Clock Skew Tolerance (±1 Block)
                  │                                        │
-                 │           Attendance Confirmed         │ Confirm Seat & Unlock Pass
+                 │           Boarding Verified            │ Confirm Seat & Unlock Pass
                  │◄───────────────────────────────────────┤
                  │                                        │
 ```
 
 * **Token Payload**: `cf://b/{BusId}?t={TimeBlock}&k={Token}`
 * **Rotation Interval**: 2 seconds
-* **Clock Tolerance**: $\pm 1$ time-step ($\pm 2\text{s}$) to absorb slight network jitter while guaranteeing zero replay attacks.
+* **Air-Gap Security**: The bus terminal has **zero internet exposure**, completely immune to network sniffing, Wi-Fi jamming, de-authentication attacks, or hotspot downtime.
 
 ---
 
@@ -70,16 +75,16 @@ Directly integrates with the **[CampusFleet Platform](https://campusfleet.vercel
 
 ---
 
-### 2. GPS Module Wiring for Offline Time Synchronization (UART2)
+### 2. GPS Module Wiring for 100% Offline Time Synchronization (UART2)
 
 Compatible with **u-blox NEO-6M, NEO-7M, NEO-M8N, ATGM336H, Quectel L80/L86**:
 
 | GPS Module Pin | ESP32 Pin | Function | Description / Notes |
 | :--- | :--- | :--- | :--- |
-| **VCC** | **VIN (5V) / 3V3** | Power Input | Most GPS breakout boards have an onboard 3.3V LDO regulator; 5V is recommended for NEO-6M |
+| **VCC** | **VIN (5V) / 3V3** | Power Input | 5V recommended for NEO-6M breakout boards with onboard LDO regulator |
 | **GND** | **GND** | Ground | Common ground shared with ESP32 |
-| **TX** | **GPIO 16 (RX2)** | Serial Data Out | Connects to ESP32 Hardware UART2 Receive pin |
-| **RX** | **GPIO 17 (TX2)** | Serial Data In | Connects to ESP32 Hardware UART2 Transmit pin (optional for read-only NMEA) |
+| **TX** | **GPIO 16 (RX2)** | Serial Data Out | Connects to ESP32 Hardware UART2 Receive (`RX2`) |
+| **RX** | **GPIO 17 (TX2)** | Serial Data In | Connects to ESP32 Hardware UART2 Transmit (`TX2`) |
 | **PPS** | **NC (Optional)** | Pulse Per Second | Optional $\pm 1\,\mu\text{s}$ atomic pulse trigger |
 
 ```
@@ -96,87 +101,26 @@ Compatible with **u-blox NEO-6M, NEO-7M, NEO-M8N, ATGM336H, Quectel L80/L86**:
 
 ---
 
-## 🛰️ Step-by-Step: Connecting GPS for Offline Time Synchronization
+## 🛰️ How Offline GPS Atomic Time Synchronization Works
 
-### Why Offline GPS Time is Essential in Transit
-In campus and inter-city transit systems, buses frequently operate through **cellular dead zones**, underground parking decks, remote suburban corridors, and express highways where 4G LTE hotspots or campus Wi-Fi lose connectivity. 
+### Why Satellites?
+GPS, Galileo, and BeiDou satellites carry onboard rubidium and cesium atomic clocks broadcasting UTC time down to nanosecond precision. The ESP32 listens to standard NMEA sentences (`$GPRMC` and `$GPGGA`) broadcast at 9600 baud, extracts the atomic UTC timestamp, and calibrates its internal hardware RTC using `settimeofday()`.
 
-Because CampusFleet's rolling QR code security relies on synchronized time (`Epoch / 2`), losing network connectivity would normally prevent NTP clock updates. 
-
-**With GPS connected**:
-- GNSS satellites (GPS / Galileo / BeiDou) continuously broadcast high-precision **UTC atomic clock timestamps** worldwide for free.
-- The ESP32 decodes standard NMEA sentences (`$GPRMC` and `$GPGGA`) over hardware UART.
-- The ESP32's internal Real-Time Clock (RTC) is calibrated offline down to the exact second via `settimeofday()`.
-- **The dynamic QR display continues rolling with 100% cryptographic precision completely offline with zero internet access.**
-
----
-
-### Step 1: Install the `TinyGPSPlus` Library
-
-#### If using PlatformIO:
-The library is already included in `platformio.ini`:
-```ini
-lib_deps =
-    bodmer/TFT_eSPI @ ^2.5.43
-    ricmoo/qrcode @ ^0.0.1
-    mikalhart/TinyGPSPlus @ ^1.0.3
-```
-
-#### If using Arduino IDE:
-1. Open Arduino IDE.
-2. Go to **Sketch $\to$ Include Library $\to$ Manage Libraries...** (or press `Ctrl+Shift+I` / `Cmd+Shift+I`).
-3. Search for **`TinyGPSPlus`** by Mikal Hart.
-4. Click **Install**.
-
----
-
-### Step 2: Wire the GPS Module to ESP32 UART2
-1. Connect the GPS **TX pin** to ESP32 **GPIO 16**.
-2. Connect the GPS **RX pin** to ESP32 **GPIO 17**.
-3. Connect the GPS **VCC** to **5V / VIN** and **GND** to **GND**.
-
-> [!TIP]
-> Ensure the ceramic patch antenna has an unobstructed view toward the sky. Mount the antenna on the bus dashboard near the windshield or front window.
-
----
-
-### Step 3: Enable Offline GPS in Firmware
-Open `esp32_rolling_qr_display.ino` (or `src/main.cpp`) and verify that `USE_OFFLINE_GPS` is enabled:
-
+### Code Implementation (`syncTimeFromGPS`):
 ```cpp
-// ── Offline GPS Configuration ──────────────────────────────────────────────
-#define USE_OFFLINE_GPS 1   // Set to 1 for 100% offline atomic GPS synchronization
-                            // Set to 0 for Wi-Fi / Hotspot NTP only
-
-#if USE_OFFLINE_GPS
 #include <TinyGPSPlus.h>
 #include <HardwareSerial.h>
 
-#define GPS_RX_PIN 16       // Connect to GPS module TX
-#define GPS_TX_PIN 17       // Connect to GPS module RX
-#define GPS_BAUD   9600     // Standard NMEA baud rate
-
 TinyGPSPlus gps;
-HardwareSerial gpsSerial(2); // ESP32 Hardware UART2
-#endif
-```
+HardwareSerial gpsSerial(2);
 
----
-
-### Step 4: How the Offline GPS Synchronization Works
-
-The firmware includes a dedicated routine that reads satellite data, converts UTC date/time to Unix Epoch seconds, and sets the ESP32 internal hardware clock:
-
-```cpp
-#if USE_OFFLINE_GPS
-bool syncTimeFromGPS(uint32_t timeoutMs = 30000) {
+bool syncTimeFromGPS(uint32_t timeoutMs = 60000) {
   uint32_t start = millis();
   while (millis() - start < timeoutMs) {
     while (gpsSerial.available() > 0) {
       gps.encode(gpsSerial.read());
     }
 
-    // Verify valid time, date, and modern year
     if (gps.time.isValid() && gps.date.isValid() && gps.date.year() >= 2025) {
       struct tm t = {0};
       t.tm_year = gps.date.year() - 1900;
@@ -192,7 +136,7 @@ bool syncTimeFromGPS(uint32_t timeoutMs = 30000) {
           .tv_sec = epoch, 
           .tv_usec = (suseconds_t)(gps.time.centisecond() * 10000) 
         };
-        // Calibrate ESP32 internal Real-Time Clock
+        // Set ESP32 hardware Real-Time Clock
         settimeofday(&tv, NULL);
         return true;
       }
@@ -201,14 +145,12 @@ bool syncTimeFromGPS(uint32_t timeoutMs = 30000) {
   }
   return false;
 }
-#endif
 ```
 
-In the main `loop()`, continuous NMEA feed maintains drift-free clock discipline:
-
+### Continuous Background Drift Discipline in `loop()`:
 ```cpp
-#if USE_OFFLINE_GPS
-  // Disciplines the internal RTC in the background while the bus travels
+void loop() {
+  // Feed GPS UART in background: continuous zero-drift atomic discipline
   while (gpsSerial.available() > 0) {
     if (gps.encode(gpsSerial.read())) {
       if (gps.time.isUpdated() && gps.time.isValid() && gps.date.isValid() && gps.date.year() >= 2025) {
@@ -227,47 +169,24 @@ In the main `loop()`, continuous NMEA feed maintains drift-free clock discipline
             .tv_usec = (suseconds_t)(gps.time.centisecond() * 10000) 
           };
           settimeofday(&tv, NULL);
-          activeSyncSource = "GPS ATOMIC";
         }
       }
     }
   }
-#endif
+
+  // Generates new rolling QR every 2 seconds
+  time_t nowSec;
+  time(&nowSec);
+  long currentTimeBlock = nowSec / 2;
+  ...
+}
 ```
-
----
-
-### Step 5: Dual-Mode Operation (Seamless Fallback)
-
-1. **Boot Priority**:
-   - The device initializes UART2 and checks for GPS satellite atomic lock.
-   - If satellites are locked, it calibrates the RTC immediately without touching Wi-Fi:
-     $$\text{Display: } \mathbf{\text{GPS Atomic Lock Acquired (Offline) } \checkmark}$$
-   - If satellites are temporarily obstructed (e.g., parked deep inside a maintenance depot), it falls back to Wi-Fi NTP:
-     $$\text{Display: } \mathbf{\text{NTP Synchronized } \checkmark \text{ (Online)}}$$
-2. **On the Road**:
-   - As soon as the bus pulls out of the depot and acquires satellites, GPS automatically takes over as the primary atomic time discipline.
-   - The footer of the display dynamically indicates the active source: `EPOCH: 1793674686s (GPS ATOMIC)` or `EPOCH: 1793674686s (NTP CLOUD)`.
-
----
-
-### Step 6: Satellite Lock LED Indicator & Diagnostics
-
-* **NEO-6M Status LED**:
-  * **Solid OFF / Constant ON**: Searching for satellites (almanac download / cold start, takes 35–60 seconds).
-  * **Blinking Blue LED (1 Hz)**: **3D Satellite Fix Confirmed**. Valid atomic time received.
-* **Serial Monitor Diagnostics** (Baud: `115200`):
-  ```text
-  [GPS] Initializing GPS UART2 on GPIO 16 (RX) / 17 (TX)...
-  [GPS] Satellite atomic lock acquired! RTC calibrated offline.
-  TimeBlock: 89683734 | Token: 9E42BC01A7F85D31 | Source: GPS ATOMIC
-  ```
 
 ---
 
 ## 🚀 Flashing & Quick Start
 
-You can build and flash using either **PlatformIO** (recommended) or the **Arduino IDE**.
+Because the firmware is **100% offline**, you do **not** need to configure any Wi-Fi SSID or password.
 
 ### Option A: Using PlatformIO (VS Code / CLI)
 
@@ -279,10 +198,8 @@ You can build and flash using either **PlatformIO** (recommended) or the **Ardui
 
 2. Open the folder in VS Code with PlatformIO IDE installed.
 
-3. Update Wi-Fi and Bus details in `src/main.cpp`:
+3. Update Bus details in `src/main.cpp`:
    ```cpp
-   const char* WIFI_SSID       = "YOUR_BUS_WIFI_HOTSPOT";
-   const char* WIFI_PASSWORD   = "YOUR_HOTSPOT_PASSWORD";
    const char* BUS_ID          = "42";               // Target Bus ID
    const char* BUS_NUMBER      = "Bus 42";
    const char* REGISTRATION_NO = "UP-16-CF-4242";
@@ -317,13 +234,25 @@ You can build and flash using either **PlatformIO** (recommended) or the **Ardui
    * In your Arduino libraries folder (`libraries/TFT_eSPI/User_Setup.h`), configure the pins matching your display driver (e.g. `#define ST7796_DRIVER` or `#define ILI9341_DRIVER`).
 
 4. Open `esp32_rolling_qr_display.ino`.
-5. Select Board: **ESP32 Dev Module**, set Baud Rate to **115200**, and click **Upload**.
+5. Update your `BUS_ID` and `MASTER_KEY_32`.
+6. Select Board: **ESP32 Dev Module**, set Baud Rate to **115200**, and click **Upload**.
+
+---
+
+## 🛰️ GPS Antenna Placement & Status Indicators
+
+* **Ceramic Patch Antenna**: Affix the antenna flat on the bus dashboard near the windshield facing the open sky.
+* **Cold Start Duration**: On first power-up, satellite almanac acquisition takes ~35–60 seconds.
+* **Lock Indicator**:
+  * **On-Board GPS LED**: 1 Hz pulsing blue LED indicates active 3D navigation lock.
+  * **TFT Display Header**: Turns green with `GPS Atomic Lock Acquired ✓`.
+  * **Footer Bar**: Displays `EPOCH: 1793674686s (OFFLINE GPS ATOMIC)` and live satellite count in serial logs.
 
 ---
 
 ## ⚡ Cloud Verification Endpoint
 
-When a student scans the dynamic rolling QR from the student portal camera scanner:
+When a student scans the dynamic rolling QR using the CampusFleet portal camera scanner:
 
 ```http
 POST /api/boarding/scan HTTP/1.1
