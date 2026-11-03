@@ -3,15 +3,16 @@
  * 
  * Hardware Target: ESP32-S3 / ESP32 NodeMCU
  * Display Target: 3.5" or 2.8" SPI TFT LCD (ST7796 / ILI9341 / ST7789)
- * Time Source: GPS Atomic Clock (NEO-6M via UART) or NTP via 4G LTE Cat-1 / Wi-Fi
+ * Time Source: GPS Atomic Clock (NEO-6M/M8N via UART2) or NTP via 4G LTE Cat-1 / Wi-Fi
  * Cryptography: Hardware-accelerated HMAC-SHA256 (mbedtls) with 32-character pre-shared key
  * 
  * Security Standard:
  * - Computes rolling token every 2 seconds: TimeBlock = EpochSeconds / 2
  * - Token = Truncated 16-hex HMAC-SHA256(SecretKey, "CFLEET:" + BusId + ":" + TimeBlock)
  * - Renders dynamic QR: cf://b/{BusId}?t={TimeBlock}&k={Token}
- * - Students scan with camera to unload/mark attendance without physical RFID cards
+ * - Students scan with camera to mark attendance without physical RFID cards
  * - Zero proxy attendance: screenshots and photos expire in 2 seconds.
+ * - OFFLINE OPERATION: Uses GPS satellite atomic clock to keep time in dead zones.
  */
 
 #include <WiFi.h>
@@ -21,7 +22,23 @@
 #include <qrcode.h>         // Lightweight embedded QR generator by Richard Moore
 #include "mbedtls/md.h"
 
-// ── Configuration ──────────────────────────────────────────────────────────
+// ── Offline GPS Configuration ──────────────────────────────────────────────
+#define USE_OFFLINE_GPS 1   // 1 = Enable GPS module via UART2 for 100% offline atomic clock sync
+                            // 0 = Use Wi-Fi / LTE Hotspot NTP only
+
+#if USE_OFFLINE_GPS
+#include <TinyGPSPlus.h>
+#include <HardwareSerial.h>
+
+#define GPS_RX_PIN 16       // Connect to GPS module TX
+#define GPS_TX_PIN 17       // Connect to GPS module RX (optional)
+#define GPS_BAUD   9600     // Standard NMEA baud rate (NEO-6M / NEO-M8N / ATGM336H)
+
+TinyGPSPlus gps;
+HardwareSerial gpsSerial(2); // ESP32 Hardware UART2
+#endif
+
+// ── Fleet & Network Configuration ──────────────────────────────────────────
 const char* WIFI_SSID       = "Bus_Onboard_WiFi";
 const char* WIFI_PASSWORD   = "TransitPass123";
 
@@ -84,7 +101,7 @@ String computeRollingToken(long timeBlock) {
 }
 
 // ── Draw Dynamic QR onto TFT Display ────────────────────────────────────────
-void renderQRCode(String payload, String token, long epochSec) {
+void renderQRCode(String payload, String token, long epochSec, const char* syncSource) {
   qrcode_initText(&qrcode, qrcodeData, QR_VERSION, ECC_MEDIUM, payload.c_str());
 
   int scale = 6;                          // Pixel multiplier per QR module
@@ -111,8 +128,42 @@ void renderQRCode(String payload, String token, long epochSec) {
   tft.drawString("TOKEN: " + token, tft.width() / 2, 280, 2);
 
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  tft.drawString("EPOCH: " + String(epochSec) + "s (2s ROLL)", tft.width() / 2, 300, 1);
+  tft.drawString("EPOCH: " + String(epochSec) + "s (" + String(syncSource) + ")", tft.width() / 2, 300, 1);
 }
+
+#if USE_OFFLINE_GPS
+// ── Synchronize ESP32 Internal RTC from GPS Satellite Atomic Time ──────────
+bool syncTimeFromGPS(uint32_t timeoutMs = 30000) {
+  uint32_t start = millis();
+  while (millis() - start < timeoutMs) {
+    while (gpsSerial.available() > 0) {
+      gps.encode(gpsSerial.read());
+    }
+
+    if (gps.time.isValid() && gps.date.isValid() && gps.date.year() >= 2025) {
+      struct tm t = {0};
+      t.tm_year = gps.date.year() - 1900;
+      t.tm_mon  = gps.date.month() - 1;
+      t.tm_mday = gps.date.day();
+      t.tm_hour = gps.time.hour();
+      t.tm_min  = gps.time.minute();
+      t.tm_sec  = gps.time.second();
+
+      time_t epoch = mktime(&t); // UTC Epoch timestamp
+      if (epoch > 1700000000) {
+        struct timeval tv = { .tv_sec = epoch, .tv_usec = (suseconds_t)(gps.time.centisecond() * 10000) };
+        settimeofday(&tv, NULL);
+        return true;
+      }
+    }
+    delay(10);
+  }
+  return false;
+}
+#endif
+
+// Active time source label
+const char* activeSyncSource = "STANDBY";
 
 // ── Setup ──────────────────────────────────────────────────────────────────
 void setup() {
@@ -129,36 +180,90 @@ void setup() {
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.drawString(String(BUS_NUMBER) + " • " + String(REGISTRATION_NO), tft.width() / 2, 40, 2);
 
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("Connecting to Network...", tft.width() / 2, 160, 2);
-
   deriveBusKey();
 
-  // Connect to Wi-Fi / LTE Cat-1 Hotspot
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  int retry = 0;
-  while (WiFi.status() != WL_CONNECTED && retry < 20) {
-    delay(500);
-    retry++;
+  bool timeSynced = false;
+
+#if USE_OFFLINE_GPS
+  Serial.println("[GPS] Initializing GPS UART2 on GPIO 16 (RX) / 17 (TX)...");
+  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString("Acquiring GPS Satellite Clock...", tft.width() / 2, 160, 2);
+
+  // Attempt to acquire satellite atomic fix
+  if (syncTimeFromGPS(35000)) {
+    timeSynced = true;
+    activeSyncSource = "GPS ATOMIC";
+    Serial.println("[GPS] Satellite atomic lock acquired! RTC calibrated offline.");
+    tft.fillRect(0, 70, tft.width(), 240, TFT_BLACK);
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("GPS Atomic Lock Acquired (Offline) ✓", tft.width() / 2, 60, 2);
+  } else {
+    Serial.println("[GPS] No satellite lock yet, checking Wi-Fi / LTE fallback...");
+  }
+#endif
+
+  if (!timeSynced) {
+    tft.fillRect(0, 150, tft.width(), 40, TFT_BLACK);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawString("Connecting to Wi-Fi NTP...", tft.width() / 2, 160, 2);
+
+    // Connect to Wi-Fi / LTE Cat-1 Hotspot
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    int retry = 0;
+    while (WiFi.status() != WL_CONNECTED && retry < 20) {
+      delay(500);
+      retry++;
+    }
+
+    // Sync atomic time via NTP servers
+    configTime(19800, 0, "pool.ntp.org", "time.google.com"); // 19800s offset for IST (+5:30)
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 10000)) {
+      timeSynced = true;
+      activeSyncSource = "NTP CLOUD";
+      tft.fillRect(0, 70, tft.width(), 240, TFT_BLACK);
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString("NTP Synchronized ✓ (Online)", tft.width() / 2, 60, 2);
+    }
   }
 
-  // Sync atomic time via NTP servers
-  configTime(19800, 0, "pool.ntp.org", "time.google.com"); // 19800s offset for IST (+5:30)
-  struct tm timeinfo;
-  while (!getLocalTime(&timeinfo)) {
-    delay(500);
-    Serial.println("Synchronizing clock...");
+  if (!timeSynced) {
+    tft.fillRect(0, 70, tft.width(), 240, TFT_BLACK);
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("Time Sync Failed - Check GPS / Wi-Fi", tft.width() / 2, 160, 2);
   }
-
-  tft.fillRect(0, 70, tft.width(), 240, TFT_BLACK);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString("NTP Synchronized ✓", tft.width() / 2, 60, 2);
 }
 
 // ── Main Loop ──────────────────────────────────────────────────────────────
 long lastTimeBlock = -1;
 
 void loop() {
+#if USE_OFFLINE_GPS
+  // Keep feeding GPS UART stream in background to maintain continuous atomic clock discipline
+  while (gpsSerial.available() > 0) {
+    if (gps.encode(gpsSerial.read())) {
+      if (gps.time.isUpdated() && gps.time.isValid() && gps.date.isValid() && gps.date.year() >= 2025) {
+        struct tm t = {0};
+        t.tm_year = gps.date.year() - 1900;
+        t.tm_mon  = gps.date.month() - 1;
+        t.tm_mday = gps.date.day();
+        t.tm_hour = gps.time.hour();
+        t.tm_min  = gps.time.minute();
+        t.tm_sec  = gps.time.second();
+
+        time_t epoch = mktime(&t);
+        if (epoch > 1700000000) {
+          struct timeval tv = { .tv_sec = epoch, .tv_usec = (suseconds_t)(gps.time.centisecond() * 10000) };
+          settimeofday(&tv, NULL);
+          activeSyncSource = "GPS ATOMIC";
+        }
+      }
+    }
+  }
+#endif
+
   time_t nowSec;
   time(&nowSec);
 
@@ -175,9 +280,11 @@ void loop() {
     Serial.print("TimeBlock: ");
     Serial.print(currentTimeBlock);
     Serial.print(" | Token: ");
-    Serial.println(token);
+    Serial.print(token);
+    Serial.print(" | Source: ");
+    Serial.println(activeSyncSource);
 
-    renderQRCode(qrPayload, token, nowSec);
+    renderQRCode(qrPayload, token, nowSec, activeSyncSource);
   }
 
   delay(100); // 100ms polling tick
