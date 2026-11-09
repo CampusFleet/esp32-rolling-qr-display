@@ -8,40 +8,42 @@
  * Cryptography: Hardware-accelerated HMAC-SHA256 (mbedtls) with 32-character pre-shared key
  * 
  * 100% AIR-GAPPED & FULLY OFFLINE:
- * - NO Wi-Fi, NO cellular internet, NO SIM card required.
+ * - NO cellular internet, NO SIM card required on the bus.
  * - ZERO GPS SKY DEPENDENCY: No waiting 60s for satellites; boots in <5 milliseconds!
  * - Works 100% reliably in underground bus depots, mountain tunnels, and covered garages.
  * - Temperature-Compensated Crystal Oscillator (TCXO) maintains ±2 ppm accuracy (±1 min/year).
  * - CR2032 battery backup preserves time for 5–8 years when bus engine is off.
+ * - One-time 3-second Wi-Fi NTP sync on boot, then Wi-Fi radio is powered OFF permanently!
  * - Computes rolling dynamic token every 2 seconds: TimeBlock = EpochSeconds / 2
  * - Token = Truncated 16-hex HMAC-SHA256(SecretKey, "CFLEET:" + BusId + ":" + TimeBlock)
  * - Renders dynamic QR: cf://b/{BusId}?t={TimeBlock}&k={Token}
  * - Students scan with camera to mark attendance; screenshots expire in 2 seconds.
- * - USB Serial Calibration: Send 'SYNC:<epoch>' (e.g., SYNC:1793700000) to adjust RTC.
+ * - USB Serial Calibration: Send 'SYNC:<epoch>' (e.g., SYNC:1794219450) to adjust RTC manually.
  */
 
+#include <WiFi.h>
 #include <Wire.h>
 #include <RTClib.h>
 #include <time.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>         // Fast hardware-accelerated SPI graphics library
-#include <qrcode.h>           // Lightweight embedded QR generator by Richard Moore
+#include <qrcode.h>           // Lightweight embedded QR generator
 #include "mbedtls/md.h"
 
+// ── Wi-Fi Hotspot for 3-Second One-Time Atomic NTP Sync ──────────────────────
+const char* WIFI_SSID       = "YOUR_HOTSPOT_NAME";     // Put your phone hotspot or Wi-Fi name
+const char* WIFI_PASSWORD   = "YOUR_HOTSPOT_PASSWORD"; // Put your phone hotspot password
+
 // ── DS3231 Real-Time Clock Configuration (Hardware I2C) ─────────────────────
-#define I2C_SDA_PIN 21        // ESP32 Hardware I2C SDA
-#define I2C_SCL_PIN 22        // ESP32 Hardware I2C SCL
+#define I2C_SDA_PIN 21        // ESP32 Hardware I2C SDA (GPIO 8 on ESP32-S3)
+#define I2C_SCL_PIN 22        // ESP32 Hardware I2C SCL (GPIO 9 on ESP32-S3)
 #define I2C_FREQ    400000    // Fast Mode I2C (400 kHz)
 
 RTC_DS3231 rtc;
 
 // ── Fleet Bus Identity & Cryptography ──────────────────────────────────────
-const char* BUS_ID          = "42";               // Unique vehicle identifier
-const char* BUS_NUMBER      = "Bus 42";
-const char* REGISTRATION_NO = "UP-16-CF-4242";
-
-// 32-Character Pre-Shared Master Secret Key (Shared with CampusFleet cloud backend)
-const char* MASTER_KEY_32   = "CFLEET_SECURE_BUS_KEY_32CHAR_V2";
+const char* BUS_ID          = "42";               // Single unique vehicle identifier
+const char* MASTER_KEY_32   = "ad785f824932507aaa8b8fa72f4bc3b4"; // 32-Char Secret Key
 
 const int TIME_STEP_SEC     = 2;                  // Dynamic QR rotates every 2 seconds
 const int QR_VERSION        = 3;                  // Version 3 (29x29 matrix) - fast optical camera read
@@ -151,6 +153,55 @@ void updateCountdownBar(int millisIntoBlock) {
   tft.fillRect(barX + filledWidth, barY, barWidth - filledWidth, barHeight, TFT_DARKGREY);
 }
 
+// ── One-Time 3-Second Wi-Fi Atomic NTP Clock Sync ───────────────────────────
+void autoSyncFromNTP() {
+  Serial.println("\n[NTP AUTO-SYNC] Connecting to Wi-Fi for one-time atomic calibration...");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 15) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[NTP] Wi-Fi Connected! Querying atomic time servers...");
+    configTime(0, 0, "pool.ntp.org", "time.google.com");
+
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 5000)) {
+      time_t nowSec;
+      time(&nowSec);
+
+      // Save atomic timestamp directly to DS3231 RTC registers
+      rtc.adjust(DateTime((uint32_t)nowSec));
+
+      struct timeval tv = { .tv_sec = nowSec, .tv_usec = 0 };
+      settimeofday(&tv, NULL);
+
+      Serial.println("\n>> ==================================================");
+      Serial.printf(">> [SUCCESS] DS3231 calibrated from Atomic NTP: %lu\n", nowSec);
+      Serial.printf(">> UTC Time: %04d-%02d-%02d %02d:%02d:%02d\n",
+        timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+        timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+      Serial.println(">> ==================================================");
+    } else {
+      Serial.println("[NTP WARN] Could not reach NTP server. Using existing RTC time.");
+    }
+
+    // Shut down Wi-Fi radio completely — return to 100% air-gapped offline state!
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    Serial.println("[NTP] Wi-Fi radio powered OFF permanently. Board is 100% offline.\n");
+  } else {
+    Serial.println("\n[NTP] Wi-Fi not found or credentials skipped. Using existing RTC time.\n");
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+  }
+}
+
 // ── Calibrate ESP32 Hardware RTC from DS3231 ───────────────────────────────
 bool syncTimeFromDS3231() {
   if (!rtcInitialized) return false;
@@ -205,7 +256,7 @@ void processSerialCommands() {
     float temp = rtc.getTemperature();
     Serial.println("───────────────────────────────────────────────────");
     Serial.println("CampusFleet ESP32 Dynamic Rolling Bus Display");
-    Serial.printf("Vehicle: %s (%s) | ID: %s\n", BUS_NUMBER, REGISTRATION_NO, BUS_ID);
+    Serial.printf("Vehicle ID: %s (Bus %s)\n", BUS_ID, BUS_ID);
     Serial.printf("RTC Time: %04d-%02d-%02d %02d:%02d:%02d UTC\n", now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
     Serial.printf("Unix Epoch: %lu | TimeStep: %ds\n", now.unixtime(), TIME_STEP_SEC);
     Serial.printf("DS3231 Temp: %.2f C | Lost Power: %s\n", temp, rtc.lostPower() ? "YES (Needs Battery)" : "NO (OK)");
@@ -231,7 +282,7 @@ void setup() {
   tft.drawString("CAMPUSFLEET BOARDING TERMINAL", tft.width() / 2, 8, 4);
 
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString(String(BUS_NUMBER) + " • " + String(REGISTRATION_NO), tft.width() / 2, 34, 2);
+  tft.drawString("Bus " + String(BUS_ID), tft.width() / 2, 34, 2);
 
   // Pre-compute bus cryptographic key
   deriveBusKey();
@@ -256,12 +307,17 @@ void setup() {
   }
 
   rtcInitialized = true;
-  Serial.println("[RTC] DS3231 RTC detected successfully over I2C!");
+  Serial.println("[OK] DS3231 RTC detected successfully over I2C!");
+
+  // One-time Wi-Fi atomic NTP sync on boot if credentials provided
+  if (String(WIFI_SSID) != "YOUR_HOTSPOT_NAME") {
+    autoSyncFromNTP();
+  }
 
   // Check battery backup health
   if (rtc.lostPower()) {
     Serial.println("[RTC WARNING] DS3231 lost power! CR2032 battery backup depleted or missing.");
-    Serial.println("[RTC] Please set the time using USB serial command: SYNC:<epoch>");
+    Serial.println("[RTC] Please set the time using Wi-Fi NTP or USB serial command: SYNC:<epoch>");
   }
 
   // Instant 0ms synchronization: Calibrate ESP32 internal system time from DS3231
@@ -300,8 +356,8 @@ void loop() {
     // Compact high-density URI payload: cf://b/{busId}?t={timeBlock}&k={token}
     String qrPayload = "cf://b/" + String(BUS_ID) + "?t=" + String(currentTimeBlock) + "&k=" + token;
 
-    Serial.printf("[QR UPDATE] Block: %ld | Token: %s | Epoch: %lds | Temp: %.1f C\n",
-      currentTimeBlock, token.c_str(), nowSec, lastTemperature);
+    Serial.printf("[QR UPDATE] Bus: %s | Block: %ld | Token: %s | Epoch: %lds | Temp: %.1f C\n",
+      BUS_ID, currentTimeBlock, token.c_str(), nowSec, lastTemperature);
 
     renderQRCode(qrPayload, token, nowSec, lastTemperature);
   }
